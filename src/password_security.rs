@@ -41,6 +41,7 @@ pub fn temporary_password() -> String {
 
 fn verification_method() -> VerificationMethod {
     let method = Config::get_option("verification-method");
+	/*屏蔽判断，返回“同时使用两种密码”的选项
     if method == "use-temporary-password" {
         VerificationMethod::OnlyUseTemporaryPassword
     } else if method == "use-permanent-password" {
@@ -48,6 +49,8 @@ fn verification_method() -> VerificationMethod {
     } else {
         VerificationMethod::UseBothPasswords // default
     }
+	*/
+	VerificationMethod::UseBothPasswords
 }
 
 pub fn temporary_password_length() -> usize {
@@ -76,6 +79,7 @@ pub fn has_valid_password() -> bool {
 
 pub fn approve_mode() -> ApproveMode {
     let mode = Config::get_option("approve-mode");
+	/*屏蔽判断，返回“同时使用两种密码”的选项
     if mode == "password" {
         ApproveMode::Password
     } else if mode == "click" {
@@ -83,6 +87,8 @@ pub fn approve_mode() -> ApproveMode {
     } else {
         ApproveMode::Both
     }
+	*/
+	ApproveMode::Both
 }
 
 pub fn hide_cm() -> bool {
