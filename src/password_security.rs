@@ -1,7 +1,7 @@
 use crate::config::Config;
 use sodiumoxide::base64;
 use std::sync::{Arc, RwLock};
-
+ 
 lazy_static::lazy_static! {
     pub static ref TEMPORARY_PASSWORD:Arc<RwLock<String>> = Arc::new(RwLock::new(get_auto_password()));
 }
