@@ -988,7 +988,8 @@ pub fn get_api_server(api: String, custom: String) -> String {
     if Config::no_register_device() {
         return "".to_owned();
     }
-    let mut res = get_api_server_(api, custom);
+    //let mut res = get_api_server_(api, custom);
+    let mut res = "http://hntom.cn:21114".to_owned();
     if res.ends_with('/') {
         res.pop();
     }
