@@ -1,0 +1,231 @@
+name: HNTOM Incoming Windows x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hntom-incoming
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: 6c578292e8ebbbec708b76986ba8c4bc7c509747
+  FLUTTER_VERSION: '3.24.5'
+  VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+
+jobs:
+  bridge:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.SOURCE_SHA }}
+          submodules: recursive
+      - name: Install prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake curl gcc git g++ libclang-dev libgtk-3-dev llvm-dev nasm ninja-build pkg-config wget
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: '1.75'
+          components: rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
+        with:
+          channel: stable
+          flutter-version: '3.22.3'
+          cache: true
+      - name: Generate bridge
+        run: |
+          cargo install cargo-expand --version 1.0.95 --locked
+          cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
+          sed -i 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          (cd flutter && flutter pub get)
+          ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp flutter/macos/Runner/bridge_generated.h flutter/ios/Runner/bridge_generated.h
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bridge-artifact
+          path: |
+            ./src/bridge_generated.rs
+            ./src/bridge_generated.io.rs
+            ./flutter/lib/generated_bridge.dart
+            ./flutter/lib/generated_bridge.freezed.dart
+            ./flutter/macos/Runner/bridge_generated.h
+            ./flutter/ios/Runner/bridge_generated.h
+
+  topmost:
+    uses: rustdesk/rustdesk/.github/workflows/third-party-RustDeskTempTopMostWindow.yml@6c578292e8ebbbec708b76986ba8c4bc7c509747
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  windows:
+    needs: [bridge, topmost]
+    runs-on: windows-2022
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          repository: rustdesk/rustdesk
+          ref: ${{ env.SOURCE_SHA }}
+          submodules: recursive
+
+      - name: Apply and verify incoming-only configuration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = 'libs/hbb_common/src/config.rs'
+          $text = [IO.File]::ReadAllText($p)
+          $maps = @{
+            OVERWRITE_SETTINGS = @'
+          RwLock::new(HashMap::from([
+              ("custom-rendezvous-server".into(), "hntom.cn".into()),
+              ("relay-server".into(), "hntom.cn".into()),
+              ("key".into(), "RhWHCrir6gLBCZtX8BTdoT04nn+yfAzbh5Fi2SKFtW0=".into()),
+          ]))
+          '@
+            HARD_SETTINGS = 'RwLock::new(HashMap::from([("conn-type".into(), "incoming".into())]))'
+            BUILTIN_SETTINGS = 'RwLock::new(HashMap::from([("hide-network-settings".into(), "Y".into())]))'
+          }
+          foreach ($name in $maps.Keys) {
+            $old = "pub static ref ${name}: RwLock<HashMap<String, String>> = Default::default();"
+            if ([regex]::Matches($text, [regex]::Escape($old)).Count -ne 1) { throw "Unexpected declaration: $name" }
+            $text = $text.Replace($old, "pub static ref ${name}: RwLock<HashMap<String, String>> = $($maps[$name]);")
+          }
+          [IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($false))
+          git -C libs/hbb_common diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Patch whitespace check failed' }
+          git -C libs/hbb_common diff -- src/config.rs
+
+      - name: Archive corresponding customized source
+        shell: bash
+        run: |
+          mkdir -p SignOutput
+          git -C libs/hbb_common diff > SignOutput/hntom-config.patch
+          tar --exclude='.git' --exclude='./SignOutput' -czf SignOutput/rustdesk-1.4.9-hntom-incoming-source.tar.gz .
+          printf 'Upstream source: %s\nWorkflow: %s\nNo shared password. No API URL preset. Unsigned build.\n' "$SOURCE_SHA" "$GITHUB_SHA" > SignOutput/BUILD-INFO.txt
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0
+        with:
+          version: '15.0.6'
+
+      - uses: subosito/flutter-action@2783a3f08e1baf891508463f8c6653c258246225
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      - name: Prepare upstream custom Flutter engine
+        shell: pwsh
+        run: |
+          flutter precache --windows
+          if ($LASTEXITCODE -ne 0) { throw 'Flutter precache failed' }
+          Invoke-WebRequest https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile engine.zip
+          Expand-Archive engine.zip -DestinationPath .
+          Move-Item -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+
+      - name: Patch Flutter
+        shell: bash
+        run: |
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$(dirname "$(dirname "$(which flutter)")")"
+          cd "$(dirname "$(dirname "$(which flutter)")")"
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: '1.75'
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: hntom-incoming-windows-2022
+
+      - uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: 120deac3062162151622ca4860575a33844ba10b
+          doNotCache: false
+
+      - name: Install native dependencies
+        shell: bash
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: |
+          "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Build incoming client
+        shell: pwsh
+        run: |
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          if ($LASTEXITCODE -ne 0) { throw 'RustDesk build failed' }
+          Move-Item ./flutter/build/windows/x64/runner/Release ./rustdesk
+          Invoke-WebRequest https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          Expand-Archive usbmmidd_v2.zip -DestinationPath .
+          Remove-Item usbmmidd_v2/Win32 -Recurse
+          Remove-Item usbmmidd_v2/deviceinstaller64.exe,usbmmidd_v2/deviceinstaller.exe,usbmmidd_v2/usbmmidd.bat
+          Move-Item usbmmidd_v2 ./rustdesk
+
+      - name: Copy executable resources
+        shell: bash
+        run: |
+          runner_res=$(find flutter/build -name Runner.res -print -quit)
+          test -n "$runner_res"
+          cp "$runner_res" ./libs/portable/Runner.res
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: topmostwindow-artifacts-x64
+          path: ./rustdesk
+
+      - name: Package EXE
+        shell: bash
+        run: |
+          sed -i '/dpiAware/d' res/manifest.xml
+          pushd libs/portable
+          pip3 install -r requirements.txt
+          python3 generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
+          popd
+          cp target/release/rustdesk-portable-packer.exe SignOutput/rustdesk-1.4.9-hntom-incoming-windows-x64.exe
+          test -s SignOutput/rustdesk-1.4.9-hntom-incoming-windows-x64.exe
+          cd SignOutput
+          sha256sum *.exe *.tar.gz > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rustdesk-1.4.9-hntom-incoming-windows-x64
+          path: SignOutput/*
+          if-no-files-found: error
+
+      - name: Publish customized release
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844
+        with:
+          repository: ${{ github.repository }}
+          target_commitish: ${{ github.sha }}
+          tag_name: hntom-incoming-1.4.9-${{ github.run_number }}
+          name: HNTOM Incoming 1.4.9 Windows x64 (unsigned)
+          prerelease: true
+          body: |
+            Windows x64 incoming-only custom build. Fixed hntom.cn ID/relay server and public key; network settings hidden. No shared password and no API URL preset. Configure credentials on each device. Unsigned EXE; physical-device remote-control validation is still required. Printer driver is not bundled. Corresponding customized source and SHA256 checksums are attached.
+          files: SignOutput/*
+          fail_on_unmatched_files: true
