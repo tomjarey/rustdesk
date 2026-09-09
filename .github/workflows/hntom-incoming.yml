@@ -135,8 +135,14 @@ jobs:
           flutter precache --windows
           if ($LASTEXITCODE -ne 0) { throw 'Flutter precache failed' }
           Invoke-WebRequest https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile engine.zip
-          Expand-Archive engine.zip -DestinationPath .
-          Move-Item -Force windows-x64-release/* C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
+          $engineSource = Join-Path $env:RUNNER_TEMP 'hntom-windows-x64-release'
+          Expand-Archive engine.zip -DestinationPath $engineSource -Force
+          $flutterBin = Split-Path (Get-Command flutter).Source -Parent
+          $engineTarget = Join-Path $flutterBin 'cache/artifacts/engine/windows-x64-release'
+          if (!(Test-Path "$engineSource/flutter_windows.dll")) { throw 'Downloaded archive is missing flutter_windows.dll' }
+          if (!(Test-Path $engineTarget -PathType Container)) { throw "Flutter engine destination not found: $engineTarget" }
+          Copy-Item "$engineSource/*" $engineTarget -Recurse -Force
+          if ((Get-FileHash "$engineSource/flutter_windows.dll").Hash -ne (Get-FileHash "$engineTarget/flutter_windows.dll").Hash) { throw 'Engine copy verification failed' }
 
       - name: Patch Flutter
         shell: bash
