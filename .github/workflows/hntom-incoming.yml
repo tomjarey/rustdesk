@@ -2,6 +2,10 @@ name: HNTOM Incoming Windows x64
 
 on:
   workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/hntom-incoming.yml'
 
 permissions:
   contents: read
@@ -11,7 +15,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_SHA: 6c578292e8ebbbec708b76986ba8c4bc7c509747
+  CUSTOM_VERSION: '1.5.0'
+  SOURCE_SHA: fada664df7a294d1d1a9ca3e7cd3637069122f17
+  HBB_COMMON_SHA: 229b904508364c8997aad0fb5af57effac859f60
+  VCPKG_COMMIT_ID: 9e593bb18ea69cc5095e012465dcd675a822ed0d
   FLUTTER_VERSION: '3.24.5'
   VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
 
@@ -24,6 +31,25 @@ jobs:
           repository: rustdesk/rustdesk
           ref: ${{ env.SOURCE_SHA }}
           submodules: recursive
+      - name: Verify pinned source and versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C libs/hbb_common rev-parse HEAD)" = "$HBB_COMMON_SHA"
+          test "$(git ls-tree HEAD libs/hbb_common | cut -f1 | cut -d' ' -f3)" = "$HBB_COMMON_SHA"
+          git submodule status --recursive | tee "$RUNNER_TEMP/hntom-submodules.txt"
+          if grep -Eq '^[+U-]' "$RUNNER_TEMP/hntom-submodules.txt"; then exit 1; fi
+          git diff --exit-code
+          git -C libs/hbb_common diff --exit-code
+          python3 - <<'PY'
+          import os, pathlib, re
+          root = pathlib.Path('.')
+          version = os.environ['CUSTOM_VERSION']
+          assert re.search(r'^version = "' + re.escape(version) + r'"$', (root / 'Cargo.toml').read_text(), re.M)
+          assert re.search(r'^version: ' + re.escape(version) + r'\+', (root / 'flutter/pubspec.yaml').read_text(), re.M)
+          assert os.environ['VCPKG_COMMIT_ID'] in (root / '.github/workflows/flutter-build.yml').read_text()
+          PY
       - name: Install prerequisites
         run: |
           sudo apt-get update
@@ -40,9 +66,17 @@ jobs:
           cache: true
       - name: Generate bridge
         run: |
+          set -euo pipefail
           cargo install cargo-expand --version 1.0.95 --locked
           cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked
-          sed -i 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('flutter/pubspec.yaml')
+          text = p.read_text()
+          old = '  extended_text: 14.0.0\n'
+          assert text.count(old) == 1, 'Unexpected extended_text declaration'
+          p.write_text(text.replace(old, '  extended_text: 13.0.0\n'))
+          PY
           (cd flutter && flutter pub get)
           ~/.cargo/bin/flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart --c-output ./flutter/macos/Runner/bridge_generated.h
           cp flutter/macos/Runner/bridge_generated.h flutter/ios/Runner/bridge_generated.h
@@ -58,7 +92,8 @@ jobs:
             ./flutter/ios/Runner/bridge_generated.h
 
   topmost:
-    uses: rustdesk/rustdesk/.github/workflows/third-party-RustDeskTempTopMostWindow.yml@6c578292e8ebbbec708b76986ba8c4bc7c509747
+    # 可复用工作流引用不能使用 env 表达式，必须与 SOURCE_SHA 保持一致。
+    uses: rustdesk/rustdesk/.github/workflows/third-party-RustDeskTempTopMostWindow.yml@fada664df7a294d1d1a9ca3e7cd3637069122f17
     with:
       upload-artifact: true
       target: windows-2022
@@ -79,6 +114,26 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           submodules: recursive
 
+      - name: Verify pinned source and versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C libs/hbb_common rev-parse HEAD)" = "$HBB_COMMON_SHA"
+          test "$(git ls-tree HEAD libs/hbb_common | cut -f1 | cut -d' ' -f3)" = "$HBB_COMMON_SHA"
+          git submodule status --recursive | tee "$RUNNER_TEMP/hntom-submodules.txt"
+          if grep -Eq '^[+U-]' "$RUNNER_TEMP/hntom-submodules.txt"; then exit 1; fi
+          git diff --exit-code
+          git -C libs/hbb_common diff --exit-code
+          python3 - <<'PY'
+          import os, pathlib, re
+          root = pathlib.Path('.')
+          version = os.environ['CUSTOM_VERSION']
+          assert re.search(r'^version = "' + re.escape(version) + r'"$', (root / 'Cargo.toml').read_text(), re.M)
+          assert re.search(r'^version: ' + re.escape(version) + r'\+', (root / 'flutter/pubspec.yaml').read_text(), re.M)
+          assert os.environ['VCPKG_COMMIT_ID'] in (root / '.github/workflows/flutter-build.yml').read_text()
+          PY
+
       - name: Apply and verify incoming-only configuration
         shell: pwsh
         run: |
@@ -91,10 +146,11 @@ jobs:
               ("custom-rendezvous-server".into(), "hntom.cn".into()),
               ("relay-server".into(), "hntom.cn".into()),
               ("key".into(), "RhWHCrir6gLBCZtX8BTdoT04nn+yfAzbh5Fi2SKFtW0=".into()),
+              ("api-server".into(), "https://hntom.cn:21114/client".into()),
           ]))
           '@
             HARD_SETTINGS = 'RwLock::new(HashMap::from([("conn-type".into(), "incoming".into())]))'
-            BUILTIN_SETTINGS = 'RwLock::new(HashMap::from([("hide-network-settings".into(), "Y".into())]))'
+            BUILTIN_SETTINGS = 'RwLock::new(HashMap::from([("hide-network-settings".into(), "Y".into()), ("allow-https-21114".into(), "Y".into())]))'
           }
           foreach ($name in $maps.Keys) {
             $old = "pub static ref ${name}: RwLock<HashMap<String, String>> = Default::default();"
@@ -102,17 +158,25 @@ jobs:
             $text = $text.Replace($old, "pub static ref ${name}: RwLock<HashMap<String, String>> = $($maps[$name]);")
           }
           [IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($false))
+          if ([IO.File]::ReadAllText($p) -cne $text) { throw 'Configuration write verification failed' }
           git -C libs/hbb_common diff --check
           if ($LASTEXITCODE -ne 0) { throw 'Patch whitespace check failed' }
           git -C libs/hbb_common diff -- src/config.rs
+          if ($LASTEXITCODE -ne 0) { throw 'Configuration diff failed' }
 
       - name: Archive corresponding customized source
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p SignOutput
           git -C libs/hbb_common diff > SignOutput/hntom-config.patch
-          tar --exclude='.git' --exclude='./SignOutput' -czf SignOutput/rustdesk-1.4.9-hntom-incoming-source.tar.gz .
-          printf 'Upstream source: %s\nWorkflow: %s\nNo shared password. No API URL preset. Unsigned build.\n' "$SOURCE_SHA" "$GITHUB_SHA" > SignOutput/BUILD-INFO.txt
+          git submodule status --recursive > SignOutput/GIT-SUBMODULES.txt
+          printf 'Custom version: %s\nUpstream source: %s\nhbb_common: %s\nvcpkg: %s\nWorkflow: %s\nID/relay: hntom.cn\nAPI: https://hntom.cn:21114/client\nBUILTIN allow-https-21114: Y\nNo shared password. TLS validation unchanged. Unsigned build.\nPrinter driver not bundled; printer code and CLI remain upstream.\nIncoming-only is a customization, not a security boundary; CLI/deep-link/IPC and device validation remain required.\nArchive is the customized pre-build source; generated bridge files are restored separately.\n' "$CUSTOM_VERSION" "$SOURCE_SHA" "$HBB_COMMON_SHA" "$VCPKG_COMMIT_ID" "$GITHUB_SHA" > SignOutput/BUILD-INFO.txt
+          # 将精确配置和子模块记录同时放入源码归档，构建后工具信息另附。
+          mkdir -p "$RUNNER_TEMP/hntom-source-provenance"
+          cp SignOutput/BUILD-INFO.txt "$RUNNER_TEMP/hntom-source-provenance/HNTOM-BUILD-INFO.txt"
+          cp SignOutput/GIT-SUBMODULES.txt "$RUNNER_TEMP/hntom-source-provenance/HNTOM-GIT-SUBMODULES.txt"
+          tar --exclude='.git' --exclude='./SignOutput' -czf "SignOutput/rustdesk-${CUSTOM_VERSION}-hntom-incoming-source.tar.gz" . -C "$RUNNER_TEMP/hntom-source-provenance" HNTOM-BUILD-INFO.txt HNTOM-GIT-SUBMODULES.txt
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -132,9 +196,14 @@ jobs:
       - name: Prepare upstream custom Flutter engine
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           flutter precache --windows
           if ($LASTEXITCODE -ne 0) { throw 'Flutter precache failed' }
-          Invoke-WebRequest https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile engine.zip
+          $engineUrl = 'https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip'
+          Invoke-WebRequest $engineUrl -OutFile engine.zip
+          $engineHash = (Get-FileHash engine.zip -Algorithm SHA256).Hash
+          "Engine URL: $engineUrl`nEngine archive SHA256 (observed, not a trusted pin): $engineHash" | Add-Content SignOutput/BUILD-INFO.txt -Encoding utf8
+          "$engineHash  engine.zip" | Set-Content SignOutput/EXTERNAL-ASSETS-SHA256.txt -Encoding utf8
           $engineSource = Join-Path $env:RUNNER_TEMP 'hntom-windows-x64-release'
           Expand-Archive engine.zip -DestinationPath $engineSource -Force
           $flutterBin = Split-Path (Get-Command flutter).Source -Parent
@@ -142,13 +211,22 @@ jobs:
           if (!(Test-Path "$engineSource/flutter_windows.dll")) { throw 'Downloaded archive is missing flutter_windows.dll' }
           if (!(Test-Path $engineTarget -PathType Container)) { throw "Flutter engine destination not found: $engineTarget" }
           Copy-Item "$engineSource/*" $engineTarget -Recurse -Force
-          if ((Get-FileHash "$engineSource/flutter_windows.dll").Hash -ne (Get-FileHash "$engineTarget/flutter_windows.dll").Hash) { throw 'Engine copy verification failed' }
+          foreach ($file in (Get-ChildItem $engineSource -File -Recurse)) {
+            $relative = [IO.Path]::GetRelativePath($engineSource, $file.FullName)
+            $destination = Join-Path $engineTarget $relative
+            if (!(Test-Path $destination -PathType Leaf)) { throw "Missing copied engine file: $relative" }
+            $hash = (Get-FileHash $file.FullName -Algorithm SHA256).Hash
+            if ($hash -ne (Get-FileHash $destination -Algorithm SHA256).Hash) { throw "Engine copy verification failed: $relative" }
+            "$hash  engine/$relative" | Add-Content SignOutput/EXTERNAL-ASSETS-SHA256.txt -Encoding utf8
+          }
 
       - name: Patch Flutter
         shell: bash
         run: |
+          set -euo pipefail
           cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$(dirname "$(dirname "$(which flutter)")")"
           cd "$(dirname "$(dirname "$(which flutter)")")"
+          git apply --check flutter_3.24.4_dropdown_menu_enableFilter.diff
           git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
@@ -170,23 +248,41 @@ jobs:
       - uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2
         with:
           vcpkgDirectory: C:\vcpkg
-          vcpkgGitCommitId: 120deac3062162151622ca4860575a33844ba10b
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           doNotCache: false
+
+      - name: Verify vcpkg and record build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C "$VCPKG_ROOT" rev-parse HEAD)" = "$VCPKG_COMMIT_ID"
+          {
+            printf '\nBuild tool versions:\n'
+            rustc --version
+            cargo --version
+            flutter --version
+            python3 --version
+            cmake --version
+            git submodule status --recursive
+          } | tee -a SignOutput/BUILD-INFO.txt
 
       - name: Install native dependencies
         shell: bash
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         run: |
+          set -euo pipefail
           "$VCPKG_ROOT/vcpkg" install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Build incoming client
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
           if ($LASTEXITCODE -ne 0) { throw 'RustDesk build failed' }
           Move-Item ./flutter/build/windows/x64/runner/Release ./rustdesk
           Invoke-WebRequest https://github.com/rustdesk-org/rdev/releases/download/usbmmidd_v2/usbmmidd_v2.zip -OutFile usbmmidd_v2.zip
+          "$((Get-FileHash usbmmidd_v2.zip -Algorithm SHA256).Hash)  usbmmidd_v2.zip" | Add-Content SignOutput/EXTERNAL-ASSETS-SHA256.txt -Encoding utf8
           Expand-Archive usbmmidd_v2.zip -DestinationPath .
           Remove-Item usbmmidd_v2/Win32 -Recurse
           Remove-Item usbmmidd_v2/deviceinstaller64.exe,usbmmidd_v2/deviceinstaller.exe,usbmmidd_v2/usbmmidd.bat
@@ -195,6 +291,7 @@ jobs:
       - name: Copy executable resources
         shell: bash
         run: |
+          set -euo pipefail
           runner_res=$(find flutter/build -name Runner.res -print -quit)
           test -n "$runner_res"
           cp "$runner_res" ./libs/portable/Runner.res
@@ -204,22 +301,35 @@ jobs:
           name: topmostwindow-artifacts-x64
           path: ./rustdesk
 
+      - name: Verify no printer driver is bundled
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $drivers = Get-ChildItem ./rustdesk -Recurse -File | Where-Object { $_.Name -match '(?i)(printer|\.ppd$|\.gpd$)' }
+          if ($drivers) { throw "Unexpected printer payload: $($drivers.FullName -join ', ')" }
+          Get-ChildItem ./rustdesk -Recurse -File | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash)  $([IO.Path]::GetRelativePath((Resolve-Path ./rustdesk).Path, $_.FullName))"
+          } | Set-Content SignOutput/PAYLOAD-SHA256.txt -Encoding utf8
+
       - name: Package EXE
         shell: bash
         run: |
+          set -euo pipefail
           sed -i '/dpiAware/d' res/manifest.xml
           pushd libs/portable
           pip3 install -r requirements.txt
           python3 generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/rustdesk.exe
           popd
-          cp target/release/rustdesk-portable-packer.exe SignOutput/rustdesk-1.4.9-hntom-incoming-windows-x64.exe
-          test -s SignOutput/rustdesk-1.4.9-hntom-incoming-windows-x64.exe
+          cp target/release/rustdesk-portable-packer.exe "SignOutput/rustdesk-${CUSTOM_VERSION}-hntom-incoming-windows-x64.exe"
+          cmp target/release/rustdesk-portable-packer.exe "SignOutput/rustdesk-${CUSTOM_VERSION}-hntom-incoming-windows-x64.exe"
+          test -s "SignOutput/rustdesk-${CUSTOM_VERSION}-hntom-incoming-windows-x64.exe"
           cd SignOutput
-          sha256sum *.exe *.tar.gz > SHA256SUMS.txt
+          sha256sum *.exe *.tar.gz *.patch BUILD-INFO.txt GIT-SUBMODULES.txt EXTERNAL-ASSETS-SHA256.txt PAYLOAD-SHA256.txt > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rustdesk-1.4.9-hntom-incoming-windows-x64
+          name: rustdesk-${{ env.CUSTOM_VERSION }}-hntom-incoming-windows-x64
           path: SignOutput/*
           if-no-files-found: error
 
@@ -228,10 +338,10 @@ jobs:
         with:
           repository: ${{ github.repository }}
           target_commitish: ${{ github.sha }}
-          tag_name: hntom-incoming-1.4.9-${{ github.run_number }}
-          name: HNTOM Incoming 1.4.9 Windows x64 (unsigned)
+          tag_name: hntom-incoming-${{ env.CUSTOM_VERSION }}-${{ github.run_number }}
+          name: HNTOM Incoming ${{ env.CUSTOM_VERSION }} Windows x64 (unsigned)
           prerelease: true
           body: |
-            Windows x64 incoming-only custom build. Fixed hntom.cn ID/relay server and public key; network settings hidden. No shared password and no API URL preset. Configure credentials on each device. Unsigned EXE; physical-device remote-control validation is still required. Printer driver is not bundled. Corresponding customized source and SHA256 checksums are attached.
+            Windows x64 incoming-only custom build. Fixed hntom.cn ID/relay server and original public key; network settings hidden. API preset exactly https://hntom.cn:21114/client; allow-https-21114=Y; TLS validation unchanged. No shared password. Configure credentials on each device. Unsigned EXE; physical-device remote-control validation is still required. Printer driver is not bundled, but upstream printer code/CLI remain. Incoming-only UI/settings are not an absolute security boundary: CLI, deep links and IPC require separate testing. Corresponding customized pre-build source and SHA256 checksums are attached. External engine hashes are recorded observations, not trusted immutable asset pins.
           files: SignOutput/*
           fail_on_unmatched_files: true
