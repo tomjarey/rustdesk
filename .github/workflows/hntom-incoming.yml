@@ -15,9 +15,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CUSTOM_VERSION: '1.5.0'
-  SOURCE_SHA: fada664df7a294d1d1a9ca3e7cd3637069122f17
-  HBB_COMMON_SHA: 229b904508364c8997aad0fb5af57effac859f60
+  CUSTOM_VERSION: '1.5.3'
+  SOURCE_SHA: 95cca3f661f635b3cc85c04935fe8d96d8f432ef
+  HBB_COMMON_SHA: fae47e024dd83cef6aaecde0aa7d11731df11649
   VCPKG_COMMIT_ID: 9e593bb18ea69cc5095e012465dcd675a822ed0d
   FLUTTER_VERSION: '3.24.5'
   VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
@@ -93,7 +93,7 @@ jobs:
 
   topmost:
     # 可复用工作流引用不能使用 env 表达式，必须与 SOURCE_SHA 保持一致。
-    uses: rustdesk/rustdesk/.github/workflows/third-party-RustDeskTempTopMostWindow.yml@fada664df7a294d1d1a9ca3e7cd3637069122f17
+    uses: rustdesk/rustdesk/.github/workflows/third-party-RustDeskTempTopMostWindow.yml@95cca3f661f635b3cc85c04935fe8d96d8f432ef
     with:
       upload-artifact: true
       target: windows-2022
@@ -159,6 +159,17 @@ jobs:
           }
           [IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($false))
           if ([IO.File]::ReadAllText($p) -cne $text) { throw 'Configuration write verification failed' }
+          foreach ($needle in @(
+            '"custom-rendezvous-server".into(), "hntom.cn".into()',
+            '"relay-server".into(), "hntom.cn".into()',
+            '"key".into(), "RhWHCrir6gLBCZtX8BTdoT04nn+yfAzbh5Fi2SKFtW0=".into()',
+            '"api-server".into(), "https://hntom.cn:21114/client".into()',
+            '"conn-type".into(), "incoming".into()',
+            '"hide-network-settings".into(), "Y".into()',
+            '"allow-https-21114".into(), "Y".into()'
+          )) {
+            if (!([IO.File]::ReadAllText($p)).Contains($needle)) { throw "Patched value missing: $needle" }
+          }
           git -C libs/hbb_common diff --check
           if ($LASTEXITCODE -ne 0) { throw 'Patch whitespace check failed' }
           git -C libs/hbb_common diff -- src/config.rs
