@@ -179,196 +179,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          #!/usr/bin/env python3
-          """强制显示控制端“显示设置 → 分辨率”菜单，并让被控端 Windows 分辨率枚举具备设备名回退。"""
-          from pathlib import Path
-
-
-          def rep(path, old, new, count=1):
-              p = Path(path)
-              t = p.read_text(encoding="utf-8")
-              n = t.count(old)
-              assert n == count, f"{path}: expected {count} occurrence(s), got {n}"
-              p.write_text(t.replace(old, new), encoding="utf-8", newline="")
-
-
-          DART = "flutter/lib/desktop/widgets/remote_toolbar.dart"
-
-          # 1) 菜单常显：去掉键盘权限、分辨率列表长度、显示器类型等前置条件
-          rep(
-              DART,
-              """    final isVirtualDisplay = ffiModel.isVirtualDisplayResolution;
-              final visible = ffiModel.keyboard &&
-                  (isVirtualDisplay || resolutions.length > 1) &&
-                  pi.currentDisplay != kAllDisplayValue;
-              if (!visible) return Offstage();""",
-              """    final isVirtualDisplay = ffiModel.isVirtualDisplayResolution;""",
-          )
-
-          # 2) 自定义分辨率输入常显，不再只对虚拟显示器开放
-          rep(
-              DART,
-              """  Widget _customResolutionMenuButton(BuildContext context, isVirtualDisplay) {
-              return Offstage(
-                offstage: !isVirtualDisplay,""",
-              """  Widget _customResolutionMenuButton(BuildContext context, isVirtualDisplay) {
-              return Offstage(
-                offstage: false,""",
-          )
-
-          # 3) “原始分辨率”不再依赖被控端上报列表是否包含该分辨率
-          rep(
-              DART,
-              """    if (!resolutions.any((e) =>
-                  e.width == display.originalWidth &&
-                  e.height == display.originalHeight)) {
-                return Offstage();
-              }
-              return Offstage(""",
-              """    return Offstage(""",
-          )
-
-          # 4) 列表为空时，“适应本地窗口”退化为直接使用本地分辨率
-          rep(
-              DART,
-              """    if (ffiModel.isVirtualDisplayResolution) {
-                return _localResolution!;
-              }
-
-              for (final r in resolutions) {""",
-              """    if (ffiModel.isVirtualDisplayResolution) {
-                return _localResolution!;
-              }
-
-              if (resolutions.isEmpty) {
-                return _localResolution;
-              }
-
-              for (final r in resolutions) {""",
-          )
-
-          # 5) 找不到最佳匹配时仍显示“适应本地窗口”按钮
-          rep(
-              DART,
-              """    final bestFitResolution = _getBestFitResolution();
-              if (bestFitResolution == null) {
-                return true;
-              }""",
-              """    final bestFitResolution = _getBestFitResolution();
-              if (bestFitResolution == null) {
-                return false;
-              }""",
-          )
-
-          # 6) 分隔线常显
-          rep(
-              DART,
-              """            _menuDivider(showOriginalBtn, showFitLocalBtn, isVirtualDisplay),""",
-              """            _menuDivider(showOriginalBtn, showFitLocalBtn, true),""",
-          )
-
-          # 7) “全部显示器”合并视图下，把分辨率改动落到主显示器（索引 0）
-          rep(
-              DART,
-              """  _onChanged(String? value) async {
-              if (pi.currentDisplay == kAllDisplayValue) {
-                return;
-              }
-              stateGlobal.setLastResolutionGroupValue(
-                  widget.id, pi.currentDisplay, value);""",
-              """  _onChanged(String? value) async {
-              final display =
-                  pi.currentDisplay == kAllDisplayValue ? 0 : pi.currentDisplay;
-              stateGlobal.setLastResolutionGroupValue(widget.id, display, value);""",
-          )
-
-          # 8) 同上：发送切换请求时在合并视图下使用主显示器
-          rep(
-              DART,
-              """  _changeResolution(int w, int h) async {
-              if (pi.currentDisplay == kAllDisplayValue) {
-                return;
-              }
-              await bind.sessionChangeResolution(
-                sessionId: ffi.sessionId,
-                display: pi.currentDisplay,
-                width: w,
-                height: h,
-              );""",
-              """  _changeResolution(int w, int h) async {
-              final display =
-                  pi.currentDisplay == kAllDisplayValue ? 0 : pi.currentDisplay;
-              await bind.sessionChangeResolution(
-                sessionId: ffi.sessionId,
-                display: display,
-                width: w,
-                height: h,
-              );""",
-          )
-
-          WIN = "src/platform/windows.rs"
-
-          # 9) Windows 被控端：上报的显示设备名无法枚举时回退到 \\.\DISPLAY1..8
-          rep(
-              WIN,
-              """pub fn resolutions(name: &str) -> Vec<Resolution> {""",
-              """fn resolve_device_name(name: &str) -> [u16; 32] {
-              unsafe {
-                  let mut dm: DEVMODEW = std::mem::zeroed();
-                  dm.dmSize = std::mem::size_of::<DEVMODEW>() as _;
-                  let probe = str_to_device_name(name);
-                  if !name.trim().is_empty()
-                      && EnumDisplaySettingsW(probe.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) != 0
-                  {
-                      return probe;
-                  }
-                  for i in 1..=8u32 {
-                      let candidate = format!("\\\\\\\\.\\\\DISPLAY{}", i);
-                      let buf = str_to_device_name(&candidate);
-                      if EnumDisplaySettingsW(buf.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) != 0 {
-                          return buf;
-                      }
-                  }
-                  probe
-              }
-          }
-
-          pub fn resolutions(name: &str) -> Vec<Resolution> {""",
-          )
-
-          rep(
-              WIN,
-              """        let mut num = 0;
-                  let device_name = str_to_device_name(name);
-                  loop {
-                      if EnumDisplaySettingsW(device_name.as_ptr(), num, &mut dm) == 0 {""",
-              """        let mut num = 0;
-                  let device_name = resolve_device_name(name);
-                  loop {
-                      if EnumDisplaySettingsW(device_name.as_ptr(), num, &mut dm) == 0 {""",
-          )
-
-          rep(
-              WIN,
-              """pub fn current_resolution(name: &str) -> ResultType<Resolution> {
-              let device_name = str_to_device_name(name);""",
-              """pub fn current_resolution(name: &str) -> ResultType<Resolution> {
-              let device_name = resolve_device_name(name);""",
-          )
-
-          rep(
-              WIN,
-              """    height: usize,
-          ) -> ResultType<()> {
-              let device_name = str_to_device_name(name);""",
-              """    height: usize,
-          ) -> ResultType<()> {
-              let device_name = resolve_device_name(name);""",
-          )
-
-          print("resolution patch applied")
-          PY
+          url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/.github/hntom/patch_resolution.py"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/hntom-patch-res.py" "$url"
+          echo "bc3e293e086717cd303d11671d2ad43fa2f5a09f31570f9adfbcfe43e1c3f0e6  $RUNNER_TEMP/hntom-patch-res.py" | sha256sum -c -
+          python3 "$RUNNER_TEMP/hntom-patch-res.py"
           grep -q 'final isVirtualDisplay = ffiModel.isVirtualDisplayResolution;' flutter/lib/desktop/widgets/remote_toolbar.dart
           grep -q 'fn resolve_device_name' src/platform/windows.rs
           git diff --check
@@ -381,6 +195,7 @@ jobs:
           mkdir -p SignOutput
           git -C libs/hbb_common diff > SignOutput/hntom-config.patch
           git diff > SignOutput/hntom-resolution.patch
+          cp "$RUNNER_TEMP/hntom-patch-res.py" SignOutput/hntom-resolution.py
           git submodule status --recursive > SignOutput/GIT-SUBMODULES.txt
           printf 'Custom version: %s\nUpstream source: %s\nhbb_common: %s\nvcpkg: %s\nWorkflow: %s\nID/relay: hntom.cn\nAPI: https://hntom.cn:21114/client\nBUILTIN allow-https-21114: Y\nNo shared password. TLS validation unchanged. Unsigned build.\nPrinter driver not bundled; printer code and CLI remain upstream.\nIncoming-only is a customization, not a security boundary; CLI/deep-link/IPC and device validation remain required.\nArchive is the customized pre-build source; generated bridge files are restored separately.\nResolution menu is forced visible on the controlling side; Windows display device name falls back to DISPLAY1-8 when the reported name cannot be enumerated.\n' "$CUSTOM_VERSION" "$SOURCE_SHA" "$HBB_COMMON_SHA" "$VCPKG_COMMIT_ID" "$GITHUB_SHA" > SignOutput/BUILD-INFO.txt
           # 将精确配置和子模块记录同时放入源码归档，构建后工具信息另附。
@@ -535,7 +350,7 @@ jobs:
           cmp target/release/rustdesk-portable-packer.exe "SignOutput/rustdesk-${CUSTOM_VERSION}-hntom-incoming-windows-x64.exe"
           test -s "SignOutput/rustdesk-${CUSTOM_VERSION}-hntom-incoming-windows-x64.exe"
           cd SignOutput
-          sha256sum *.exe *.tar.gz *.patch BUILD-INFO.txt GIT-SUBMODULES.txt EXTERNAL-ASSETS-SHA256.txt PAYLOAD-SHA256.txt > SHA256SUMS.txt
+          sha256sum *.exe *.tar.gz *.patch *.py BUILD-INFO.txt GIT-SUBMODULES.txt EXTERNAL-ASSETS-SHA256.txt PAYLOAD-SHA256.txt > SHA256SUMS.txt
           sha256sum --check SHA256SUMS.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
